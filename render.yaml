@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: feelhub4u
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: TMDB_API_KEY
+        sync: false
