@@ -25,6 +25,7 @@ let seq = 0, busy = false, now = "", tm, raf = 0, CUR = "";
 // Storage helpers (browser only)
 const LS = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const SET = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+const UID = LS("fh_uid", "") || (() => { const id = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)); SET("fh_uid", id); return id; })();
 
 // Theme
 const isDark = () => root.dataset.theme === "dark" || (!root.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
@@ -390,11 +391,12 @@ async function sendChat(text) {
   chatHist.push({ role: "user", content: text });
   const wait = addMsg("a", "", true);
   try {
-    const r = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages: chatHist.slice(-10) }) });
+    const r = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json", "x-client-id": UID }, body: JSON.stringify({ messages: chatHist.slice(-10) }) });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error);
+    if (!r.ok) { wait.remove(); return addMsg("a", d.error || "Please try again later."); }
     wait.remove();
     addMsg("a", d.reply);
+    if (d.left != null) $("cleft").textContent = ` · ${d.left} left today`;
     chatHist.push({ role: "assistant", content: d.reply });
     if (d.picks && d.picks.length) {
       remember(d.picks);

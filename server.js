@@ -99,6 +99,23 @@ async function details(id, region, loc) {
 
 const SYS = "You are the FeelHub4u assistant for movies, anime and songs. Suggest Indian movies first (Hindi, Bangla, Tamil, Telugu, Malayalam) unless the user asks for something else. Keep replies short and friendly. Never say a title is on a specific platform or has subtitles or dubs; tell the user to check the platform. Do not invent facts.";
 const LANGW = { hindi: "hi", bollywood: "hi", indian: "hi", bangla: "bn", bengali: "bn", bangali: "bn", tamil: "ta", telugu: "te", malayalam: "ml", kannada: "kn", marathi: "mr", punjabi: "pa", korean: "ko", japanese: "ja", anime: "ja", english: "en" };
+// Daily fair-use limits for the assistant. Counters reset at UTC midnight. All limits can be set in Render environment variables.
+const CHAT_USER = Number(process.env.CHAT_PER_USER) || 15, CHAT_IP = Number(process.env.CHAT_PER_IP) || 80, CHAT_ALL = Number(process.env.CHAT_TOTAL) || 500;
+let chatDay = "", chatAll = 0;
+const chatUser = new Map(), chatIp = new Map();
+function chatQuota(uid, ip) {
+  const d = new Date().toISOString().slice(0, 10);
+  if (d !== chatDay) { chatDay = d; chatAll = 0; chatUser.clear(); chatIp.clear(); }
+  if (chatAll >= CHAT_ALL) return { ok: false, msg: "The assistant has reached today's limit for everyone. Please come back tomorrow." };
+  const u = chatUser.get(uid) || 0, p = chatIp.get(ip) || 0;
+  if (u >= CHAT_USER || p >= CHAT_IP) return { ok: false, msg: `You have used today's ${CHAT_USER} assistant messages. Please come back tomorrow.` };
+  return { ok: true, left: CHAT_USER - u - 1 };
+}
+function chatCount(uid, ip) {
+  chatAll++;
+  chatUser.set(uid, (chatUser.get(uid) || 0) + 1);
+  chatIp.set(ip, (chatIp.get(ip) || 0) + 1);
+}
 async function chat(req, res) {
   if (limited(req.socket.remoteAddress)) return send(res, 429, { error: "Too many requests" });
   const body = await readBody(req);
@@ -107,6 +124,11 @@ async function chat(req, res) {
     .map(m => ({ role: m.role, content: m.content.slice(0, 800) }));
   const last = [...msgs].reverse().find(m => m.role === "user");
   if (!last) throw bad();
+  const uid = /^[\w-]{16,64}$/.test(req.headers["x-client-id"] || "") ? req.headers["x-client-id"] : "anon";
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",").pop().trim();
+  const q = chatQuota(uid, ip);
+  if (!q.ok) return send(res, 429, { error: q.msg });
+  chatCount(uid, ip);
   const words = last.content.toLowerCase().split(/\W+/);
   const lang = words.map(w => LANGW[w]).find(Boolean) || "hi";
   const anime = words.includes("anime");
@@ -137,7 +159,7 @@ async function chat(req, res) {
       else console.error("[feelhub4u] AI status", r.status);
     } catch (e) { console.error("[feelhub4u] AI", e.message); }
   }
-  return send(res, 200, { reply, picks });
+  return send(res, 200, { reply, picks, left: q.left });
 }
 
 function staticFile(p, res) {
