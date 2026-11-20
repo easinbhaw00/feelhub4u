@@ -37,7 +37,7 @@ const norm = m => ({
   id: m.id, title: String(m.title || ""), year: (m.release_date || "").slice(0, 4),
   date: /^\d{4}-\d{2}-\d{2}$/.test(m.release_date || "") ? m.release_date : "",
   rating: +(m.vote_average || 0).toFixed(1), lang: String(m.original_language || ""),
-  overview: (m.overview || "").slice(0, 280), poster: img(m.poster_path),
+  overview: (m.overview || "").slice(0, 280), poster: img(m.poster_path), backdrop: img(m.backdrop_path),
 });
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -52,8 +52,15 @@ async function movies(u) {
   const g = k => u.searchParams.get(k) || "";
   const q = g("q").trim().slice(0, 100), type = g("type") || "trending", genres = g("genres"), lang = g("lang"), page = g("page") || "1", loc = g("loc") || "en-US";
   if (!/^\d{1,3}$/.test(page) || !okLoc(loc) || (lang && !/^[a-z]{2}$/.test(lang)) ||
-      (genres && !/^\d+(\|\d+){0,4}$/.test(genres)) || (!q && !genres && type !== "anime" && !TYPES[type])) throw bad();
+      (genres && !/^\d+(\|\d+){0,4}$/.test(genres)) || (!q && !genres && type !== "anime" && type !== "dated" && !TYPES[type])) throw bad();
   let d;
+  if (type === "dated" && !q) {
+    const from = g("from"), to = g("to");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw bad();
+    const sort = g("sort") === "desc" ? "primary_release_date.desc" : "primary_release_date.asc";
+    d = await tmdb("/discover/movie", { "primary_release_date.gte": from, "primary_release_date.lte": to, sort_by: sort, include_adult: "false", page }, loc);
+    return { results: d.results.map(norm), page: d.page, totalPages: Math.min(d.total_pages || 1, 500) };
+  }
   if (q) d = await tmdb("/search/movie", { query: q, page }, loc);
   else if (genres || type === "anime") {
     const L = type === "anime" ? "ja" : lang;
