@@ -6,7 +6,7 @@ const PUB = path.join(__dirname, "public"), TMDB = "https://api.themoviedb.org/3
 const TYPES = { trending: "/trending/movie/week", top: "/movie/top_rated", upcoming: "/movie/upcoming", now: "/movie/now_playing" };
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".webp": "image/webp", ".ico": "image/x-icon" };
 const HEAD = {
-  "Content-Security-Policy": "default-src 'self'; img-src 'self' https://image.tmdb.org https://*.mzstatic.com data:; media-src https://*.apple.com https://*.mzstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; frame-src https://www.youtube-nocookie.com; connect-src 'self' https://itunes.apple.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  "Content-Security-Policy": "default-src 'self'; img-src 'self' https://image.tmdb.org https://i.ytimg.com https://*.mzstatic.com data:; media-src https://*.apple.com https://*.mzstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; frame-src https://www.youtube-nocookie.com; connect-src 'self' https://itunes.apple.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
 };
 const hits = new Map();
@@ -37,7 +37,7 @@ const norm = m => ({
   id: m.id, title: String(m.title || ""), year: (m.release_date || "").slice(0, 4),
   date: /^\d{4}-\d{2}-\d{2}$/.test(m.release_date || "") ? m.release_date : "",
   rating: +(m.vote_average || 0).toFixed(1), lang: String(m.original_language || ""),
-  overview: (m.overview || "").slice(0, 280), poster: img(m.poster_path), backdrop: img(m.backdrop_path),
+  overview: (m.overview || "").slice(0, 280), poster: img(m.poster_path), backdrop: img(m.backdrop_path), adult: m.adult === true,
 });
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -52,8 +52,12 @@ async function movies(u) {
   const g = k => u.searchParams.get(k) || "";
   const q = g("q").trim().slice(0, 100), type = g("type") || "trending", genres = g("genres"), lang = g("lang"), page = g("page") || "1", loc = g("loc") || "en-US";
   if (!/^\d{1,3}$/.test(page) || !okLoc(loc) || (lang && !/^[a-z]{2}$/.test(lang)) ||
-      (genres && !/^\d+(\|\d+){0,4}$/.test(genres)) || (!q && !genres && type !== "anime" && type !== "dated" && !TYPES[type])) throw bad();
+      (genres && !/^\d+(\|\d+){0,4}$/.test(genres)) || (!q && !genres && type !== "anime" && type !== "dated" && type !== "adult" && !TYPES[type])) throw bad();
   let d;
+  if (type === "adult" && !q) {
+    d = await tmdb("/discover/movie", { include_adult: "true", sort_by: "popularity.desc", page }, loc);
+    return { results: d.results.map(norm).filter(m => m.adult), page: d.page, totalPages: Math.min(d.total_pages || 1, 500) };
+  }
   if (type === "dated" && !q) {
     const from = g("from"), to = g("to");
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw bad();
@@ -74,12 +78,12 @@ async function movies(u) {
 const vids = o => o.videos?.results || o.results || [];
 const trailerOf = list => {
   const v = list.filter(x => x.site === "YouTube" && /^[\w-]{6,20}$/.test(x.key));
-  const t = v.find(x => x.type === "Trailer") || v.find(x => x.type === "Teaser") || v[0];
+  const t = v.find(x => x.type === "Trailer" && x.official) || v.find(x => x.type === "Trailer") || v.find(x => x.type === "Teaser") || v[0];
   return t ? t.key : null;
 };
 async function details(id, region, loc) {
-  const d = await tmdb(`/movie/${id}`, { append_to_response: "videos,watch/providers,credits,recommendations" }, loc);
-  let trailer = trailerOf(vids(d));
+  const d = await tmdb(`/movie/${id}`, { append_to_response: "watch/providers,credits,recommendations,external_ids" }, loc);
+  let trailer = trailerOf(vids(await tmdb(`/movie/${id}/videos`, {}, loc)));
   if (!trailer && loc !== "en-US") trailer = trailerOf(vids(await tmdb(`/movie/${id}/videos`, {}, "en-US")));
   let overview = d.overview || "";
   if (!overview && loc !== "en-US") overview = (await tmdb(`/movie/${id}`, {}, "en-US")).overview || "";
@@ -93,6 +97,7 @@ async function details(id, region, loc) {
     cast: (d.credits?.cast || []).slice(0, 12).map(c => ({ name: String(c.name || "").slice(0, 60), role: String(c.character || "").slice(0, 60), photo: img(c.profile_path) })),
     similar: (d.recommendations?.results || []).slice(0, 12).map(norm),
     providers: w ? { flatrate: pick(w.flatrate), rent: pick(w.rent), buy: pick(w.buy) } : null,
+    imdb: /^tt\d+$/.test(d.external_ids?.imdb_id || "") ? d.external_ids.imdb_id : null,
     link: w && typeof w.link === "string" && w.link.startsWith("https://") ? w.link : null,
   };
 }
@@ -162,6 +167,38 @@ async function chat(req, res) {
   return send(res, 200, { reply, picks, left: q.left });
 }
 
+const normTv = m => ({ id: m.id, kind: "tv", title: String(m.name || ""), year: (m.first_air_date || "").slice(0, 4), date: /^\d{4}-\d{2}-\d{2}$/.test(m.first_air_date || "") ? m.first_air_date : "", rating: +(m.vote_average || 0).toFixed(1), lang: String(m.original_language || ""), overview: (m.overview || "").slice(0, 280), poster: img(m.poster_path), backdrop: img(m.backdrop_path), adult: false });
+const TV_TYPES = { trending: "/trending/tv/week", top: "/tv/top_rated", onair: "/tv/on_the_air", airing: "/tv/airing_today", popular: "/tv/popular" };
+async function tvList(u) {
+  const g = k => u.searchParams.get(k) || "";
+  const q = g("q").trim().slice(0, 100), type = g("type") || "trending", genres = g("genres"), page = g("page") || "1", loc = g("loc") || "en-US";
+  if (!/^\d{1,3}$/.test(page) || !okLoc(loc) || (genres && !/^\d+(\|\d+){0,4}$/.test(genres)) || (!q && !genres && !TV_TYPES[type])) throw bad();
+  let d;
+  if (q) d = await tmdb("/search/tv", { query: q, page }, loc);
+  else if (genres) d = await tmdb("/discover/tv", { with_genres: genres, sort_by: "popularity.desc", "vote_count.gte": 30, page }, loc);
+  else d = await tmdb(TV_TYPES[type], { page }, loc);
+  return { results: d.results.map(normTv), page: d.page, totalPages: Math.min(d.total_pages || 1, 500) };
+}
+async function tvDetails(id, region, loc) {
+  const d = await tmdb(`/tv/${id}`, { append_to_response: "watch/providers,credits,recommendations,external_ids" }, loc);
+  let trailer = trailerOf(vids(await tmdb(`/tv/${id}/videos`, {}, loc)));
+  if (!trailer && loc !== "en-US") trailer = trailerOf(vids(await tmdb(`/tv/${id}/videos`, {}, "en-US")));
+  const w = region ? d["watch/providers"]?.results?.[region] : null;
+  const pick = l => (l || []).map(p => ({ name: String(p.provider_name || "").slice(0, 60), logo: img(p.logo_path) }));
+  return {
+    id: d.id, kind: "tv", title: String(d.name || ""), overview: (d.overview || "").slice(0, 700),
+    year: (d.first_air_date || "").slice(0, 4), date: /^\d{4}-\d{2}-\d{2}$/.test(d.first_air_date || "") ? d.first_air_date : "",
+    lang: String(d.original_language || ""), rating: +(d.vote_average || 0).toFixed(1), runtime: Number((d.episode_run_time || [])[0]) || 0,
+    seasons: d.number_of_seasons || 0, episodes: d.number_of_episodes || 0, status: String(d.status || "").slice(0, 40),
+    genres: (d.genres || []).map(x => String(x.name)).slice(0, 5), backdrop: img(d.backdrop_path), poster: img(d.poster_path), trailer,
+    cast: (d.credits?.cast || []).slice(0, 12).map(c => ({ name: String(c.name || "").slice(0, 60), role: String(c.character || "").slice(0, 60), photo: img(c.profile_path) })),
+    similar: (d.recommendations?.results || []).slice(0, 12).map(normTv),
+    providers: w ? { flatrate: pick(w.flatrate), rent: pick(w.rent), buy: pick(w.buy) } : null,
+    link: w && typeof w.link === "string" && w.link.startsWith("https://") ? w.link : null,
+    imdb: /^tt\d+$/.test(d.external_ids?.imdb_id || "") ? d.external_ids.imdb_id : null,
+  };
+}
+
 function staticFile(p, res) {
   const f = path.normalize(path.join(PUB, p === "/" ? "index.html" : decodeURIComponent(p)));
   if (!f.startsWith(PUB + path.sep)) return send(res, 403, "Forbidden", "text/plain");
@@ -181,6 +218,9 @@ const server = http.createServer(async (req, res) => {
       if (limited(req.socket.remoteAddress)) return send(res, 429, { error: "Too many requests" });
       if (!KEY) return send(res, 503, { error: "Service unavailable" });
       if (u.pathname === "/api/movies") return send(res, 200, await movies(u));
+      if (u.pathname === "/api/tv") return send(res, 200, await tvList(u));
+      const tm = u.pathname.match(/^\/api\/tv\/(\d{1,9})$/);
+      if (tm) { const reg = u.searchParams.get("region") || "", loc = u.searchParams.get("loc") || "en-US"; if (!okLoc(loc)) throw bad(); return send(res, 200, await tvDetails(tm[1], okReg(reg) ? reg : "", loc)); }
       const m = u.pathname.match(/^\/api\/movie\/(\d{1,9})$/);
       if (m) {
         const reg = u.searchParams.get("region") || "", loc = u.searchParams.get("loc") || "en-US";
